@@ -6,26 +6,39 @@
 #include "hardware/dma.h"
 #include "hardware/pio.h"
 #include "hardware/clocks.h"
+#include "hardware/pwm.h"
 
-#define captureSize 432
+#define captureSize 432 //should be big enough at sampling rate to capture the entirety of the control signal
+#define samplingRate 190000 //38000 * 5
 #define capturePin 13
 #define vS 14
 #define decode 1
+#define servoA 12
+#define servoB 11
 
 void dmaHandler();
 static inline void setupDma(PIO, uint);
 static inline void setupPIO(PIO, uint, uint, bool, float);
+uint16_t convertValue(float);
 
 uint32_t buffer[captureSize];
+uint16_t wrapValue = 50000;
 uint dmaChan;
 PIO pio;
 uint sm;
+uint servoPins[] = {12, 11};
+uint totalServos = 2;
+
+float servoValues[] = {85, 190}; //two servos to control, 0-180
+float pwmDiv = 50.f;
+
+bool updateValues = false;
 
 int main()
 {
     stdio_init_all();
     dmaChan = dma_claim_unused_channel(true);
-    float clkdiv = clock_get_hz(clk_sys) / (38000 * 5);
+    float clkdiv = clock_get_hz(clk_sys) / (samplingRate);
 
     irq_set_exclusive_handler(DMA_IRQ_0, dmaHandler);
     irq_set_enabled(DMA_IRQ_0, true);
@@ -43,6 +56,21 @@ int main()
 
     setupDma(pio, sm);
     setupPIO(pio, sm, capturePin, false, clkdiv);
+    
+    //--------- SERVO ----------
+    gpio_set_function(servoA, GPIO_FUNC_PWM);
+    gpio_set_function(servoB, GPIO_FUNC_PWM);
+    pwm_config servoConf = pwm_get_default_config();
+    pwm_config_set_wrap(&servoConf, wrapValue - 1);
+    pwm_config_set_clkdiv(&servoConf, pwmDiv);
+    for (int i = 0; i < totalServos; i++)
+    {
+        pwm_init(pwm_gpio_to_slice_num(servoPins[i]), &servoConf, true);
+        pwm_set_gpio_level(servoPins[i], convertValue(servoValues[i]));
+    }
+    // pwm_init(pwm_gpio_to_slice_num(servoA), &servoConf, true);
+    // pwm_set_gpio_level(servoA, convertValue(servoValues[0]));
+    //--------- SERVO ----------
 
     while (true)
     {
@@ -51,6 +79,15 @@ int main()
         // printf("%d\n", dma_channel_is_busy(dmaChan));
     }
     return 0;
+}
+uint16_t convertValue(float angle)
+{
+    if (angle < 0) {angle = 0;}
+    if (angle > 180) {angle = 180;}
+    float portion = angle / 180;
+    uint16_t result = ((1 + portion) / 20) * wrapValue;
+    printf("%u\n", result);
+    return result;
 }
 
 void dmaHandler()
