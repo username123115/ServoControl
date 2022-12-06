@@ -35,6 +35,7 @@ target_link_libraries(ServoControl
         hardware_pwm
         hardware_pio
         hardware_dma
+        hardware_i2c
         )
 
 pico_add_extra_outputs(ServoControl)

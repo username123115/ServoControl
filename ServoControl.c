@@ -1,4 +1,6 @@
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include "pico/stdlib.h"
 #include "hardware/uart.h"
 #include "hardware/gpio.h"
@@ -7,6 +9,8 @@
 #include "hardware/pio.h"
 #include "hardware/clocks.h"
 #include "hardware/pwm.h"
+#include "hardware/i2c.h"
+#include "time.h"
 
 #define captureSize 432 //should be big enough at sampling rate to capture the entirety of the control signal
 #define samplingRate 190000 //38000 * 5
@@ -16,10 +20,39 @@
 #define servoA 12
 #define servoB 11
 
+// ------- I2C pain --------
+
+#define I2C_PORT i2c0
+#define I2C_SDA 8
+#define I2C_SCL 9
+#define POWER 13
+#define PWR_MGMT_1 0x6B //107
+#define GYRO_CONFIG 0x1B //27
+#define ACCEL_CONFIG 0x1C //28
+#define MEASURE_START 0x3B //Accel measurements start
+#define MPU6050 0x68
+#define LED_PIN 6
+#define GYRO_TASK_TIME 100000
+
+int writeRegister(i2c_inst_t * i2c, 
+                const uint addr,
+                const uint8_t reg,
+                uint8_t *buf,
+                const uint8_t nbytes);
+
+int readRegister(i2c_inst_t * i2c,
+                const uint addr,
+                const uint8_t reg,
+                uint8_t *buf,
+                const uint8_t nbytes);
+
+// ------- I2C pain --------
+
+
 void dmaHandler();
 static inline void setupDma(PIO, uint);
 static inline void setupPIO(PIO, uint, uint, bool, float);
-uint16_t convertValue(float);
+uint16_t convertValue(float*);
 
 uint32_t buffer[captureSize];
 uint16_t wrapValue = 50000;
@@ -29,8 +62,9 @@ uint sm;
 uint servoPins[] = {12, 11};
 uint totalServos = 2;
 
-float servoValues[] = {85, 190}; //two servos to control, 0-180
+float servoValues[] = {80, 80}; //two servos to control, 0-180
 float pwmDiv = 50.f;
+bool forwardDrive = true;
 
 bool updateValues = false;
 
@@ -66,25 +100,90 @@ int main()
     for (int i = 0; i < totalServos; i++)
     {
         pwm_init(pwm_gpio_to_slice_num(servoPins[i]), &servoConf, true);
-        pwm_set_gpio_level(servoPins[i], convertValue(servoValues[i]));
+        pwm_set_gpio_level(servoPins[i], convertValue(&servoValues[i]));
     }
     // pwm_init(pwm_gpio_to_slice_num(servoA), &servoConf, true);
     // pwm_set_gpio_level(servoA, convertValue(servoValues[0]));
     //--------- SERVO ----------
 
+    uint32_t timeNow = time_us_32(); //this can last an hour?
+    
+    i2c_init(I2C_PORT, 400*1000);
+    
+    gpio_init(LED_PIN);
+    gpio_set_dir(LED_PIN, true);
+
+    gpio_set_function(I2C_SDA, GPIO_FUNC_I2C);
+    gpio_set_function(I2C_SCL, GPIO_FUNC_I2C);
+    gpio_pull_up(I2C_SDA);
+    gpio_pull_up(I2C_SCL);
+
+    uint8_t powerManagementSettings = 0x00;
+    uint8_t gyroConfigSettings = 0x00;
+    uint8_t accelConfigSettings = 0x00;
+
+    writeRegister(I2C_PORT, MPU6050, PWR_MGMT_1, &powerManagementSettings, 1);
+    writeRegister(I2C_PORT, MPU6050, GYRO_CONFIG, &gyroConfigSettings, 1);
+    writeRegister(I2C_PORT, MPU6050, ACCEL_CONFIG, &accelConfigSettings, 1);
+
+    uint8_t accelMeasurements[] = {0, 0};
+    uint8_t regAddress = 0x47;
+    uint16_t final = 0;
+    bool neg = false;
+
+    //--------- more I2C pain --------
+
+
     while (true)
     {
         // printf("%u\n", pio_sm_get_blocking(pio, sm));
-        tight_loop_contents();
+        if ((time_us_32() - timeNow) > GYRO_TASK_TIME)
+        {
+            // printf("bruh\n");
+            readRegister(I2C_PORT, MPU6050, regAddress, (uint8_t*)&accelMeasurements, 2);
+            final = (accelMeasurements[0] << 8) + accelMeasurements[1];
+            neg = false;
+            if ((accelMeasurements[0] >> 7) == 1)
+            {
+                neg = true;
+            }
+            if (neg)
+            {
+                final = ((~final) & 0xFFFF) + 1;
+            }
+        if (neg && final > 256)
+        {
+            printf("right\n");
+            gpio_put(LED_PIN, true);
+        }
+        if (!neg && final > 256)
+        {
+            printf("left\n");
+            gpio_put(LED_PIN, false);
+        }
+
+
+            timeNow += GYRO_TASK_TIME;
+        }
+
+        if (updateValues)
+        {
+            for (int i = 0; i < totalServos; i++)
+            {
+                pwm_init(pwm_gpio_to_slice_num(servoPins[i]), &servoConf, true);
+                pwm_set_gpio_level(servoPins[i], convertValue(&servoValues[i]));
+            }
+            updateValues = false;
+        }
         // printf("%d\n", dma_channel_is_busy(dmaChan));
     }
     return 0;
 }
-uint16_t convertValue(float angle)
+uint16_t convertValue(float *angle)
 {
-    if (angle < 0) {angle = 0;}
-    if (angle > 180) {angle = 180;}
-    float portion = angle / 180;
+    if (*angle < 0) {*angle = 0;}
+    if (*angle > 180) {*angle = 180;}
+    float portion = *angle / 180;
     uint16_t result = ((1 + portion) / 20) * wrapValue;
     printf("%u\n", result);
     return result;
@@ -154,6 +253,25 @@ void dmaHandler()
         {
             // printf("%u\n", extractedData);
             printf("Raw: %u, Command: %u, Repeat: %d\n", extractedData, n1 >> 1, n1 & 1u);
+            updateValues = true;
+            switch (n1 >> 1)
+            {
+            case 76: //up
+                servoValues[0] = 120; //original 120 moter a = left
+                servoValues[1] = 80;
+                break;
+            case 102:
+                servoValues[0] = 85;
+                servoValues[1] = 20;
+                break;
+            case 42:
+                servoValues[0] = 85;
+                servoValues[1] = 85;
+                break;
+            default:
+                updateValues = false;
+                break;
+            }
         }
     }
 
@@ -205,6 +323,42 @@ static inline void setupDma(PIO pio, uint sm)
         true
     );
 
+}
+
+int writeRegister(i2c_inst_t * i2c, 
+                const uint addr,
+                const uint8_t reg,
+                uint8_t *buf,
+                const uint8_t nbytes)
+{
+    if (nbytes < 0)
+    {
+        return 0;
+    }
+    int bytesWritten = 0;
+    uint8_t * msg = malloc(sizeof(uint8_t) * (nbytes + 1));
+    msg[0] = reg;
+    memcpy(msg + 1, buf, nbytes);
+    bytesWritten = i2c_write_blocking(i2c, addr, msg, nbytes + 1, false);
+
+    free(msg);
+    msg = NULL;
+    return bytesWritten;
+}
+int readRegister(i2c_inst_t * i2c,
+                const uint addr,
+                const uint8_t reg,
+                uint8_t *buf,
+                const uint8_t nbytes)
+{
+    if (nbytes < 1)
+    {
+        return 0;
+    }
+    int bytesRead = 0;
+    i2c_write_blocking(i2c, addr, &reg, 1, true);
+    bytesRead = i2c_read_blocking(i2c, addr, buf, nbytes, false);
+    return bytesRead;
 }
 
 // % c-sdk {
