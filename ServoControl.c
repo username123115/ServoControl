@@ -62,11 +62,15 @@ uint sm;
 uint servoPins[] = {12, 11};
 uint totalServos = 2;
 
+float leftSpeed = 40;
+float rightSpeed = 40;
+
 float servoValues[] = {80, 80}; //two servos to control, 0-180
 float pwmDiv = 50.f;
 bool forwardDrive = true;
-
+bool stop = false;
 bool updateValues = false;
+float errorCorrection = 0.005;
 
 int main()
 {
@@ -151,23 +155,57 @@ int main()
             {
                 final = ((~final) & 0xFFFF) + 1;
             }
+        if (!stop)
+        {
         if (neg && final > 256)
         {
             printf("right\n");
             gpio_put(LED_PIN, true);
+            rightSpeed += (final - 256) * 2 * errorCorrection + 1;
+            updateValues = true;
         }
         if (!neg && final > 256)
         {
             printf("left\n");
             gpio_put(LED_PIN, false);
+            rightSpeed -= (final - 256) * errorCorrection + 1;
+            updateValues = true;
+        }
         }
 
 
             timeNow += GYRO_TASK_TIME;
         }
+        if (stop)
+        {
+            //complete reset
+            leftSpeed = 70;
+            rightSpeed = 70;
+            servoValues[0] = 83;
+            servoValues[1] = 80;
+        }
+        if (!stop)
+        {
+            if (rightSpeed < -75) rightSpeed = -75;
+            if (rightSpeed > 90) rightSpeed = 90;
+            if (leftSpeed < -75) leftSpeed = -75;
+            if (leftSpeed > 90) leftSpeed = 90;
+            if (forwardDrive)
+            {
+                servoValues[0] = 90 - rightSpeed;
+                servoValues[1] = 90 + leftSpeed;
+            }
+            if (!forwardDrive)
+            {
+                servoValues[0] = 90 + rightSpeed;
+                servoValues[1] = 90 - leftSpeed;
+            }
+        }
+
 
         if (updateValues)
         {
+
             for (int i = 0; i < totalServos; i++)
             {
                 pwm_init(pwm_gpio_to_slice_num(servoPins[i]), &servoConf, true);
@@ -257,16 +295,23 @@ void dmaHandler()
             switch (n1 >> 1)
             {
             case 76: //up
-                servoValues[0] = 120; //original 120 moter a = left
-                servoValues[1] = 80;
+                // servoValues[0] = 120; //original 120 moter a = left
+                // servoValues[1] = 80;
+
+                stop = false;
+                forwardDrive = true;
                 break;
             case 102:
-                servoValues[0] = 85;
-                servoValues[1] = 20;
+                // servoValues[0] = 85;
+                // servoValues[1] = 20;
+
+                stop = false;
+                forwardDrive = false;
                 break;
             case 42:
-                servoValues[0] = 85;
-                servoValues[1] = 85;
+                // servoValues[0] = 85;
+                // servoValues[1] = 85;
+                stop = true;
                 break;
             default:
                 updateValues = false;
